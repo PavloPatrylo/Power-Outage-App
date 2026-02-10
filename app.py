@@ -14,6 +14,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Налаштування сторінки
 st.set_page_config(
@@ -166,7 +168,7 @@ def visualize_schedule(data, target_groups):
     ax.set_ylim(-0.5, len(display_groups) - 0.5)
     
     # Лінія поточного часу
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Europe/Kyiv"))
     current_time = now.hour + now.minute / 60.0
     ax.axvline(x=current_time, color='blue', linestyle='--', linewidth=2, label=f'Зараз: {now.strftime("%H:%M")}')
     
@@ -177,6 +179,30 @@ def visualize_schedule(data, target_groups):
     
     plt.tight_layout()
     return fig
+
+def display_schedule_table(data, target_groups):
+    """Вивід розкладу відключень у вигляді таблиці"""
+    all_data = data.get("schedules", {})
+    
+    if not target_groups:
+        return
+    
+    st.subheader("📋 Детальний розклад по годинах")
+    
+    # Готуємо дані для таблиці
+    table_data = []
+    for group in sorted(target_groups):
+        if group in all_data:
+            intervals = [f"{s} — {e}" for s, e in all_data[group]]
+            table_data.append({
+                "Група": group,
+                "Періоди відключень": " | ".join(intervals)
+            })
+    
+    if table_data:
+        st.table(pd.DataFrame(table_data))
+    else:
+        st.info("Дані для обраних груп відсутні")
 
 def find_common_power_slots(data, target_groups):
     """Пошук спільних годин зі світлом"""
@@ -270,7 +296,7 @@ def main():
                     progress_bar = st.progress(0)
                     
                     # Крок 1: Підключення
-                    emoji_placeholder.markdown("### 🌐")
+                    emoji_placeholder.markdown("### ")
                     status_placeholder.info("🌐 Підключення до сайту Львівобленерго...")
                     progress_bar.progress(20)
                     
@@ -301,7 +327,7 @@ def main():
                                 json.dump(data, f, ensure_ascii=False, indent=4)
                             
                             # Крок 5: Завершено
-                            emoji_placeholder.markdown("### ✅")
+                            emoji_placeholder.markdown("###")
                             progress_bar.progress(100)
                             
                             # Показуємо деталі оновлення
@@ -406,6 +432,8 @@ def main():
                         st.markdown("🔵 **Синя лінія** - поточний час")
             else:
                 st.info("👆 Оберіть групи у бічній панелі для відображення графіка")
+        st.markdown("---")
+        display_schedule_table(data, selected_groups)
         
         with tab2:
             st.subheader("Спільні години зі світлом")
