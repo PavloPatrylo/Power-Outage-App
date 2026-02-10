@@ -62,7 +62,7 @@
 **Павло Патрило**
 
 * GitHub: [@PavloPatrylo](https://github.com/PavloPatrylo)
-* Проєкт: [Power Outage Schedules Lviv](https://github.com/PavloPatrylo/Power_Outage_Schedules)
+* Проєкт: [Power Outage Schedules Lviv](https://github.com/PavloPatrylo/Power-Outage-App)
 
 ---
 
