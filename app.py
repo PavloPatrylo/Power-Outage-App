@@ -111,8 +111,9 @@ def parse_html_to_data(html):
         if group_match:
             group_name = group_match.group(1)
             times = re.findall(time_pattern, text)
-            if times:
-                final_result["schedules"][group_name] = times
+            # Якщо не знайдено жодного інтервалу відключень, 
+            # додаємо порожній список (електроенергія є весь день)
+            final_result["schedules"][group_name] = times if times else []
                 
     return final_result
 
@@ -148,11 +149,12 @@ def visualize_schedule(data, target_groups):
         # Зелений фон (світло є)
         ax.add_patch(patches.Rectangle((0, i - 0.5), 24, 1, color='#2ecc71', alpha=0.3))
         
-        # Червоні зони (відключення)
-        for start_str, end_str in all_data[group]:
-            start = time_to_float(start_str)
-            end = time_to_float(end_str)
-            ax.add_patch(patches.Rectangle((start, i - 0.5), end - start, 1, color='#e74c3c', alpha=0.8))
+        # Червоні зони (відключення) - тільки якщо є інтервали відключень
+        if all_data[group]:  # Перевіряємо, чи список не порожній
+            for start_str, end_str in all_data[group]:
+                start = time_to_float(start_str)
+                end = time_to_float(end_str)
+                ax.add_patch(patches.Rectangle((start, i - 0.5), end - start, 1, color='#e74c3c', alpha=0.8))
     
     # Налаштування сітки
     ax.set_yticks(range(len(display_groups)))
@@ -193,11 +195,17 @@ def display_schedule_table(data, target_groups):
     table_data = []
     for group in sorted(target_groups):
         if group in all_data:
-            intervals = [f"{s} — {e}" for s, e in all_data[group]]
-            table_data.append({
-                "Група": group,
-                "Періоди відключень": " | ".join(intervals)
-            })
+            if all_data[group]:  # Якщо є відключення
+                intervals = [f"{s} — {e}" for s, e in all_data[group]]
+                table_data.append({
+                    "Група": group,
+                    "Періоди відключень": " | ".join(intervals)
+                })
+            else:  # Якщо немає відключень
+                table_data.append({
+                    "Група": group,
+                    "Періоди відключень": "⚡ Електроенергія весь день"
+                })
     
     if table_data:
         st.table(pd.DataFrame(table_data))
@@ -212,6 +220,11 @@ def find_common_power_slots(data, target_groups):
     
     for group in target_groups:
         if group not in all_data:
+            continue
+        
+        # Якщо для групи немає відключень, світло є весь день (0-1440 хвилин)
+        if not all_data[group]:
+            all_groups_on_minutes.append([(0, 1440)])
             continue
         
         off_slots = sorted([(time_to_min(s), time_to_min(e)) for s, e in all_data[group]])
@@ -250,6 +263,18 @@ def get_outage_statistics(data):
     stats = []
     
     for group, intervals in all_data.items():
+        # Якщо немає відключень
+        if not intervals:
+            stats.append({
+                "Група": group,
+                "К-сть відключень": 0,
+                "Загалом без світла (год)": 0.0,
+                "Макс. тривалість (год)": 0.0,
+                "Середня тривалість (год)": 0.0,
+                "% доби без світла": "0%"
+            })
+            continue
+        
         total_hours = 0
         durations = []
         
@@ -296,7 +321,7 @@ def main():
                     progress_bar = st.progress(0)
                     
                     # Крок 1: Підключення
-                    emoji_placeholder.markdown("### ")
+                    emoji_placeholder.markdown("### 🌐")
                     status_placeholder.info("🌐 Підключення до сайту Львівобленерго...")
                     progress_bar.progress(20)
                     
@@ -327,13 +352,15 @@ def main():
                                 json.dump(data, f, ensure_ascii=False, indent=4)
                             
                             # Крок 5: Завершено
-                            emoji_placeholder.markdown("###")
+                            emoji_placeholder.markdown("### ✅")
                             progress_bar.progress(100)
                             
                             # Показуємо деталі оновлення
                             groups_count = len(data["schedules"])
+                            groups_with_power = sum(1 for v in data["schedules"].values() if not v)
                             status_placeholder.success(
                                 f"✅ Готово! Завантажено графіки для {groups_count} груп. "
+                                f"({'⚡ ' + str(groups_with_power) + ' груп зі світлом весь день' if groups_with_power > 0 else ''}) "
                                 f"Дані актуальні станом на {data['update_time']}"
                             )
                             
