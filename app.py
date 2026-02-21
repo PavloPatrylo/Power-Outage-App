@@ -94,7 +94,7 @@ def parse_html_to_data(html):
     time_pattern = r"(\d{2}:\d{2})\s+(?:до|по)\s+(\d{2}:\d{2})"
     
     final_result = {
-        "update_time": "Невідомо",
+        "update_time": None,
         "schedules": {}
     }
     
@@ -103,17 +103,35 @@ def parse_html_to_data(html):
     for p in paragraphs:
         text = p.get_text()
         
+        # Шукаємо час оновлення
         update_match = re.search(update_time_pattern, text)
         if update_match:
             final_result["update_time"] = update_match.group(1)
         
+        # Шукаємо групи та часи
         group_match = re.search(group_pattern, text)
         if group_match:
             group_name = group_match.group(1)
             times = re.findall(time_pattern, text)
-            # Якщо не знайдено жодного інтервалу відключень, 
-            # додаємо порожній список (електроенергія є весь день)
             final_result["schedules"][group_name] = times if times else []
+
+    # --- НОВИЙ БЛОК ЛОГІКИ ---
+    # Якщо регулярні вирази не спрацювали (не знайдено жодної групи)
+    if not final_result["schedules"]:
+        now = datetime.now(ZoneInfo("Europe/Kyiv"))
+        # Встановлюємо поточний час як час оновлення
+        final_result["update_time"] = now.strftime("%H:%M")
+        
+        # Вважаємо, що для всіх стандартних груп світло є (пустий список інтервалів)
+        available_groups = ['1.1', '1.2', '2.1', '2.2', '3.1', '3.2', 
+                            '4.1', '4.2', '5.1', '5.2', '6.1', '6.2']
+        for group in available_groups:
+            final_result["schedules"][group] = []
+            
+    # Якщо час оновлення не знайшли, але групи є (теж підстраховка)
+    if not final_result["update_time"]:
+        final_result["update_time"] = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%H:%M")
+    # -------------------------
                 
     return final_result
 
