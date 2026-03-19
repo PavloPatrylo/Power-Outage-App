@@ -6,7 +6,7 @@ import re
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import StringIO
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -54,6 +54,14 @@ st.markdown("""
     .stAlert {
         border-radius: 10px;
     }
+    div[data-testid="stRadio"] > label {
+        font-weight: bold;
+        font-size: 1rem;
+    }
+    div[data-testid="stRadio"] > div {
+        display: flex;
+        gap: 1rem;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -71,22 +79,18 @@ AVAILABLE_GROUPS = [
 # Допоміжні функції
 # ──────────────────────────────────────────────
 
-def make_all_power_on_data():
+def make_all_power_on_data(date_label=None):
     """Фолбек: вважаємо що світло є у всіх групах."""
     now = datetime.now(ZoneInfo("Europe/Kyiv"))
     return {
         "update_time": now.strftime("%H:%M"),
+        "date_label": date_label or now.strftime("%d.%m.%Y"),
         "schedules": {group: [] for group in AVAILABLE_GROUPS}
     }
 
 
 def get_dynamic_html(url):
-    """Завантаження динамічного HTML з сайту.
-    
-    Чекає лише на базовий <body>, а не на конкретний клас,
-    щоб не плутати помилку мережі зі зміною верстки.
-    Повертає рядок HTML або None при мережевій помилці.
-    """
+    """Завантаження динамічного HTML з сайту."""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -101,7 +105,6 @@ def get_dynamic_html(url):
     driver = webdriver.Chrome(options=chrome_options)
     try:
         driver.get(url)
-        # Чекаємо лише на body — щоб відрізнити мережеву помилку від зміни верстки
         WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
@@ -112,70 +115,112 @@ def get_dynamic_html(url):
         driver.quit()
 
 
-def parse_html_to_data(html):
-    """Парсинг HTML та витягування даних про графіки.
-
-    Якщо структура сайту змінилась і потрібні елементи/регулярні вирази
-    не знайдено — повертає фолбек (світло є у всіх групах).
+def parse_schedule_block(paragraphs):
     """
-    soup = BeautifulSoup(html, 'html.parser')
-    text_container = soup.find('div', class_='power-off__text')
-
-    # ── Структура сайту змінилась: потрібного контейнера немає ──
-    if not text_container:
-        return make_all_power_on_data()
-
-    update_time_pattern = r"станом на (\d{2}:\d{2})"
+    Парсинг списку параграфів одного блоку розкладу.
+    Повертає dict: {"update_time": str|None, "date_label": str|None, "schedules": {...}}
+    """
+    update_time_pattern = r"станом на (\d{2}:\d{2})\s+(\d{2}\.\d{2}\.\d{4})"
+    update_time_pattern_no_date = r"станом на (\d{2}:\d{2})"
+    date_header_pattern = r"на (\d{2}\.\d{2}\.\d{4})"
     group_pattern = r"Група\s+(\d\.\d)"
     time_pattern = r"(\d{2}:\d{2})\s+(?:до|по)\s+(\d{2}:\d{2})"
 
-    final_result = {
+    result = {
         "update_time": None,
+        "date_label": None,
         "schedules": {}
     }
-
-    paragraphs = text_container.find_all('p')
 
     for p in paragraphs:
         text = p.get_text()
 
+        # Час оновлення з датою (напр. "станом на 20:56 19.03.2026")
         update_match = re.search(update_time_pattern, text)
         if update_match:
-            final_result["update_time"] = update_match.group(1)
+            result["update_time"] = update_match.group(1)
+            # Дата оновлення — не обов'язково дата розкладу, тому не перезаписуємо date_label
+            continue
 
+        # Час оновлення без дати
+        update_match_simple = re.search(update_time_pattern_no_date, text)
+        if update_match_simple and not result["update_time"]:
+            result["update_time"] = update_match_simple.group(1)
+            continue
+
+        # Дата у заголовку (напр. "Графік погодинних відключень на 19.03.2026")
+        date_header_match = re.search(date_header_pattern, text)
+        if date_header_match and not result["date_label"]:
+            result["date_label"] = date_header_match.group(1)
+
+        # Групи
         group_match = re.search(group_pattern, text)
         if group_match:
             group_name = group_match.group(1)
             times = re.findall(time_pattern, text)
-            final_result["schedules"][group_name] = times if times else []
+            result["schedules"][group_name] = times if times else []
 
-    # ── Регулярні вирази не знайшли жодної групи ──
-    if not final_result["schedules"]:
-        return make_all_power_on_data()
+    return result
 
-    # ── Час оновлення не знайшли, але групи є ──
-    if not final_result["update_time"]:
-        final_result["update_time"] = (
-            datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%H:%M")
-        )
 
-    return final_result
+def parse_html_to_data(html):
+    """
+    Парсинг HTML.
+
+    Шукає всі блоки .power-off__text на сторінці.
+    Кожен блок — окремий день (сьогодні / завтра).
+
+    Повертає список dict-ів: [{"update_time":..., "date_label":..., "schedules":{...}}, ...]
+    Якщо структура сайту змінилась — повертає [фолбек].
+    """
+    now = datetime.now(ZoneInfo("Europe/Kyiv"))
+    soup = BeautifulSoup(html, 'html.parser')
+    text_containers = soup.find_all('div', class_='power-off__text')
+
+    if not text_containers:
+        return [make_all_power_on_data(now.strftime("%d.%m.%Y"))]
+
+    results = []
+    for container in text_containers:
+        paragraphs = container.find_all('p')
+        block = parse_schedule_block(paragraphs)
+
+        # Фолбек якщо нічого не знайдено в блоці
+        if not block["schedules"]:
+            continue
+
+        if not block["update_time"]:
+            block["update_time"] = now.strftime("%H:%M")
+
+        results.append(block)
+
+    if not results:
+        return [make_all_power_on_data(now.strftime("%d.%m.%Y"))]
+
+    # Якщо date_label не витягнувся з тексту — проставляємо евристично
+    # (перший блок = сьогодні, другий = завтра)
+    today_str = now.strftime("%d.%m.%Y")
+    tomorrow_str = (now + timedelta(days=1)).strftime("%d.%m.%Y")
+    fallback_dates = [today_str, tomorrow_str]
+
+    for i, block in enumerate(results):
+        if not block["date_label"] and i < len(fallback_dates):
+            block["date_label"] = fallback_dates[i]
+
+    return results
 
 
 def time_to_float(t_str):
-    """Конвертація часу у float для графіка."""
     h, m = map(int, t_str.split(':'))
     return h + m / 60.0
 
 
 def time_to_min(t_str):
-    """Конвертація часу у хвилини."""
     h, m = map(int, t_str.split(':'))
     return h * 60 + m
 
 
 def min_to_time(m):
-    """Конвертація хвилин у рядок часу."""
     return f"{int(m // 60):02d}:{int(m % 60):02d}"
 
 
@@ -187,6 +232,7 @@ def visualize_schedule(data, target_groups):
     """Візуалізація графіка відключень."""
     all_data = data.get("schedules", {})
     update_time = data.get("update_time", "Невідомо")
+    date_label = data.get("date_label", datetime.now().strftime('%d.%m.%Y'))
 
     display_groups = [g for g in sorted(target_groups, reverse=True) if g in all_data]
 
@@ -201,10 +247,8 @@ def visualize_schedule(data, target_groups):
     ax.set_facecolor('#ffffff')
 
     for i, group in enumerate(display_groups):
-        # Зелений фон (світло є)
         ax.add_patch(patches.Rectangle((0, i - 0.5), 24, 1, color='#2ecc71', alpha=0.3))
 
-        # Червоні зони (відключення)
         if all_data[group]:
             for start_str, end_str in all_data[group]:
                 start = time_to_float(start_str)
@@ -229,19 +273,22 @@ def visualize_schedule(data, target_groups):
     ax.set_ylim(-0.5, len(display_groups) - 0.5)
 
     now = datetime.now(ZoneInfo("Europe/Kyiv"))
-    current_time = now.hour + now.minute / 60.0
-    ax.axvline(
-        x=current_time, color='blue', linestyle='--', linewidth=2,
-        label=f'Зараз: {now.strftime("%H:%M")}'
-    )
+    # Синя лінія поточного часу — тільки якщо переглядаємо сьогоднішній графік
+    today_str = now.strftime("%d.%m.%Y")
+    if date_label == today_str:
+        current_time = now.hour + now.minute / 60.0
+        ax.axvline(
+            x=current_time, color='blue', linestyle='--', linewidth=2,
+            label=f'Зараз: {now.strftime("%H:%M")}'
+        )
+        ax.legend(loc='upper right')
 
     plt.title(
-        f"Графік відключень станом на {update_time} "
-        f"(дата: {datetime.now().strftime('%d.%m.%Y')})",
+        f"Графік відключень на {date_label} "
+        f"(інформація станом на {update_time})",
         fontsize=14, pad=20
     )
     ax.set_xlabel("Години", fontsize=12)
-    ax.legend(loc='upper right')
 
     plt.tight_layout()
     return fig
@@ -382,7 +429,6 @@ def main():
                 with progress_placeholder.container():
                     progress_bar = st.progress(0)
 
-                    # Крок 1: Підключення
                     emoji_placeholder.markdown("### 🌐")
                     status_placeholder.info("🌐 Підключення до сайту Львівобленерго...")
                     progress_bar.progress(20)
@@ -390,7 +436,6 @@ def main():
                     url = "https://poweron.loe.lviv.ua/"
                     html = get_dynamic_html(url)
 
-                    # ── Мережева помилка: сайт взагалі недоступний ──
                     if html is None:
                         emoji_placeholder.markdown("### ⚠️")
                         progress_bar.progress(60)
@@ -398,54 +443,48 @@ def main():
                             "⚠️ Сайт недоступний. "
                             "Припускаємо, що електроенергія є у всіх групах."
                         )
-                        data = make_all_power_on_data()
+                        now = datetime.now(ZoneInfo("Europe/Kyiv"))
+                        days_data = [make_all_power_on_data(now.strftime("%d.%m.%Y"))]
 
                     else:
-                        # Крок 2: Завантаження HTML
                         emoji_placeholder.markdown("### 📥")
                         status_placeholder.info("📥 Завантаження графіків відключень...")
                         progress_bar.progress(50)
 
-                        # Крок 3: Парсинг
                         emoji_placeholder.markdown("### 🔍")
                         status_placeholder.info("🔍 Аналіз даних по групах...")
                         progress_bar.progress(70)
 
-                        data = parse_html_to_data(html)
+                        # parse_html_to_data тепер повертає список (1 або 2 дні)
+                        days_data = parse_html_to_data(html)
 
-                        # Визначаємо, чи спрацював фолбек всередині parse_html_to_data.
-                        # Якщо всі групи мають порожній список і структура сайту відома —
-                        # це може бути фолбек. Але ми не можемо відрізнити "дійсно немає
-                        # відключень" від "фолбек", тому просто показуємо результат.
-
-                    # Крок 4: Збереження (завжди, навіть для фолбеку)
                     emoji_placeholder.markdown("### 💾")
                     status_placeholder.info("💾 Збереження оновлених даних...")
                     progress_bar.progress(90)
 
                     with open('schedule.json', 'w', encoding='utf-8') as f:
-                        json.dump(data, f, ensure_ascii=False, indent=4)
+                        json.dump(days_data, f, ensure_ascii=False, indent=4)
 
-                    # Крок 5: Завершено
                     emoji_placeholder.markdown("### ✅")
                     progress_bar.progress(100)
 
-                    groups_count = len(data["schedules"])
+                    days_count = len(days_data)
+                    groups_count = len(days_data[0]["schedules"]) if days_data else 0
                     groups_with_power = sum(
-                        1 for v in data["schedules"].values() if not v
-                    )
+                        1 for v in days_data[0]["schedules"].values() if not v
+                    ) if days_data else 0
 
-                    if html is None:
-                        # Повідомлення вже показано вище як warning
-                        pass
-                    else:
+                    day_word = "день" if days_count == 1 else "дні"
+
+                    if html is not None:
                         status_placeholder.success(
-                            f"✅ Готово! Завантажено графіки для {groups_count} груп. "
+                            f"✅ Готово! Завантажено графіки на {days_count} {day_word}, "
+                            f"{groups_count} груп. "
                             + (
                                 f"⚡ {groups_with_power} груп зі світлом весь день. "
                                 if groups_with_power > 0 else ""
                             )
-                            + f"Дані актуальні станом на {data['update_time']}"
+                            + f"Дані актуальні станом на {days_data[0]['update_time']}"
                         )
 
                     import time
@@ -475,9 +514,52 @@ def main():
     # ── Основний контент ──
     if os.path.exists('schedule.json'):
         with open('schedule.json', 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            raw = json.load(f)
+
+        # Підтримка старого формату (dict) і нового (list)
+        if isinstance(raw, dict):
+            days_data = [raw]
+        else:
+            days_data = raw
+
+        # ── Вибір дня (тільки якщо є більше одного дня) ──
+        if len(days_data) > 1:
+            now = datetime.now(ZoneInfo("Europe/Kyiv"))
+            today_str = now.strftime("%d.%m.%Y")
+
+            day_labels = []
+            for i, day in enumerate(days_data):
+                label = day.get("date_label", "")
+                if label == today_str:
+                    day_labels.append(f"📅 Сьогодні ({label})")
+                elif i == 0:
+                    day_labels.append(f"📅 {label}" if label else f"📅 День {i+1}")
+                else:
+                    day_labels.append(f"📅 Завтра ({label})" if label else f"📅 День {i+1}")
+
+            # Дефолт — сьогоднішній день
+            default_idx = 0
+            for i, day in enumerate(days_data):
+                if day.get("date_label", "") == today_str:
+                    default_idx = i
+                    break
+
+            st.subheader("📆 Оберіть день")
+            selected_day_label = st.radio(
+                "День розкладу:",
+                day_labels,
+                index=default_idx,
+                horizontal=True,
+                label_visibility="collapsed"
+            )
+            selected_day_idx = day_labels.index(selected_day_label)
+            data = days_data[selected_day_idx]
+            st.markdown("---")
+        else:
+            data = days_data[0]
 
         update_time = data.get("update_time", "Невідомо")
+        date_label = data.get("date_label", datetime.now().strftime('%d.%m.%Y'))
 
         col1, col2, col3 = st.columns(3)
 
@@ -485,7 +567,7 @@ def main():
             st.metric("⏰ Час оновлення", update_time)
 
         with col2:
-            st.metric("📅 Дата", datetime.now().strftime('%d.%m.%Y'))
+            st.metric("📅 Дата графіка", date_label)
 
         with col3:
             total_hours = 0
@@ -579,12 +661,10 @@ def main():
             if not stats_df.empty:
                 col_left, col_right = st.columns([1, 3])
                 with col_left:
-                    with open('schedule.json', 'r', encoding='utf-8') as f:
-                        json_data = f.read()
-
+                    json_export = json.dumps(days_data, ensure_ascii=False, indent=4)
                     st.download_button(
                         label="📥 Завантажити дані (JSON)",
-                        data=json_data,
+                        data=json_export,
                         file_name=f"schedule_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
                         mime="application/json",
                         use_container_width=True
